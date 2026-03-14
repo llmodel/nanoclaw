@@ -41,6 +41,9 @@ const CREDENTIALS_FILE = path.join(
 // Refresh 5 minutes before expiry
 const REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
+// Serializes concurrent refresh attempts so only one runs at a time
+let refreshLock: Promise<void> = Promise.resolve();
+
 interface ClaudeCredentials {
   claudeAiOauth?: {
     accessToken: string;
@@ -73,43 +76,55 @@ function writeCredentialsFile(creds: ClaudeCredentials): void {
 async function getValidOAuthToken(
   oauthTokenFromEnv: string | undefined,
 ): Promise<string | undefined> {
-  // Try credentials file first (preferred — supports refresh)
+  // Fast path: check without lock
   const creds = readCredentialsFile();
   const oauth = creds?.claudeAiOauth;
+  if (oauth?.accessToken && oauth.expiresAt - Date.now() > REFRESH_BUFFER_MS) {
+    return oauth.accessToken;
+  }
 
-  if (oauth?.accessToken) {
-    const now = Date.now();
-    if (oauth.expiresAt - now > REFRESH_BUFFER_MS) {
-      // Token still fresh
-      return oauth.accessToken;
-    }
+  // Needs refresh — serialize via lock to prevent concurrent refresh races
+  let result: string | undefined;
+  const prev = refreshLock;
+  let release!: () => void;
+  refreshLock = new Promise<void>((r) => (release = r));
 
-    // Token expired or expiring soon — attempt refresh
-    if (oauth.refreshToken) {
+  try {
+    await prev; // wait for any in-flight refresh to complete
+
+    // Double-check after acquiring lock (another caller may have already refreshed)
+    const creds2 = readCredentialsFile();
+    const oauth2 = creds2?.claudeAiOauth;
+    if (oauth2?.accessToken && oauth2.expiresAt - Date.now() > REFRESH_BUFFER_MS) {
+      result = oauth2.accessToken;
+    } else if (oauth2?.refreshToken) {
       logger.info('OAuth token expired, refreshing...');
-      const refreshed = await refreshOAuthToken(oauth.refreshToken);
+      const refreshed = await refreshOAuthToken(oauth2.refreshToken);
       if (refreshed) {
-        // Persist the new tokens
         const updated: ClaudeCredentials = {
-          ...creds,
+          ...creds2,
           claudeAiOauth: {
-            ...oauth,
+            ...oauth2,
             accessToken: refreshed.accessToken,
-            refreshToken: refreshed.refreshToken ?? oauth.refreshToken,
+            refreshToken: refreshed.refreshToken ?? oauth2.refreshToken,
             expiresAt: refreshed.expiresAt,
           },
         };
         writeCredentialsFile(updated);
         logger.info('OAuth token refreshed and saved');
-        return refreshed.accessToken;
+        result = refreshed.accessToken;
+      } else {
+        logger.warn('Token refresh failed, falling back to existing token');
+        result = oauth2.accessToken ?? oauthTokenFromEnv;
       }
-      logger.warn('Token refresh failed, falling back to existing token');
-      return oauth.accessToken;
+    } else {
+      result = oauthTokenFromEnv;
     }
+  } finally {
+    release();
   }
 
-  // Fall back to .env token
-  return oauthTokenFromEnv;
+  return result;
 }
 
 interface RefreshedToken {
