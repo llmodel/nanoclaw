@@ -44,21 +44,27 @@ npm run build        # Compile TypeScript
 
 Service management:
 ```bash
-# macOS (launchd)
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
-
 # Linux (systemd)
 systemctl --user start nanoclaw
 systemctl --user stop nanoclaw
 systemctl --user restart nanoclaw
 ```
 
-## Troubleshooting
+## Upstream Updates
 
-**WhatsApp not connecting after upgrade:** WhatsApp is now a separate channel fork, not bundled in core. Run `/add-whatsapp` (or `git remote add whatsapp https://github.com/qwibitai/nanoclaw-whatsapp.git && git fetch whatsapp main && (git merge whatsapp/main || { git checkout --theirs package-lock.json && git add package-lock.json && git merge --continue; }) && npm run build`) to install it. Existing auth credentials and groups are preserved.
+See [docs/my-update-process.md](docs/my-update-process.md) for the full process.
+Use `/update-nanoclaw` with the **merge** strategy. Do not rebase.
 
 ## Container Build Cache
 
 The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+
+### Alwasy include front matter when create a new markdown file
+Purpose: for progressive disclosure
+Include the following:
+name: (title)
+description:
+last-updated:
+
+### Commit changes before a new workstream
+After the plannin session and before starting to execute the plan, always check for uncommitted changes first and commit them before commensing the new work.
