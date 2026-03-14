@@ -11,3 +11,6 @@
 import './telegram.js';
 
 // whatsapp
+
+// web-ui
+import './web-ui.js';
