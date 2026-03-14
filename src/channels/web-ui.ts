@@ -48,9 +48,13 @@ class WebUIChannel implements Channel {
 
 registerChannel('web-ui', (opts: ChannelOpts): Channel | null => {
   const env = readEnvFile(['WEB_UI_PORT', 'WEB_UI_HOST', 'WEB_UI_AUTH_TOKEN']);
-  const port = parseInt(env.WEB_UI_PORT ?? process.env.WEB_UI_PORT ?? '3000', 10);
+  const port = parseInt(
+    env.WEB_UI_PORT ?? process.env.WEB_UI_PORT ?? '3000',
+    10,
+  );
   const host = env.WEB_UI_HOST ?? process.env.WEB_UI_HOST ?? 'localhost';
-  const authToken = env.WEB_UI_AUTH_TOKEN ?? process.env.WEB_UI_AUTH_TOKEN ?? undefined;
+  const authToken =
+    env.WEB_UI_AUTH_TOKEN ?? process.env.WEB_UI_AUTH_TOKEN ?? undefined;
 
   const server = new WebUIServer({
     port,
