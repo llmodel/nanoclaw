@@ -9,10 +9,17 @@
  *             API key via /api/oauth/claude_cli/create_api_key.
  *             Proxy injects real OAuth token on that exchange request;
  *             subsequent requests carry the temp key which is valid as-is.
+ *
+ * OAuth tokens are short-lived (~5h). The proxy reads them from
+ * ~/.claude/.credentials.json and auto-refreshes using the refresh token
+ * when the access token is expired or a 401 is returned.
  */
 import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
@@ -21,6 +28,154 @@ export type AuthMode = 'api-key' | 'oauth';
 
 export interface ProxyConfig {
   authMode: AuthMode;
+}
+
+// Claude.ai OAuth constants
+const CLAUDE_AI_TOKEN_URL = 'https://api.claude.ai/oauth/token';
+const CLAUDE_CODE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const CREDENTIALS_FILE = path.join(
+  os.homedir(),
+  '.claude',
+  '.credentials.json',
+);
+// Refresh 5 minutes before expiry
+const REFRESH_BUFFER_MS = 5 * 60 * 1000;
+
+interface ClaudeCredentials {
+  claudeAiOauth?: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number;
+    scopes?: string[];
+    subscriptionType?: string;
+    rateLimitTier?: string;
+  };
+}
+
+function readCredentialsFile(): ClaudeCredentials | null {
+  try {
+    const content = fs.readFileSync(CREDENTIALS_FILE, 'utf-8');
+    return JSON.parse(content) as ClaudeCredentials;
+  } catch {
+    return null;
+  }
+}
+
+function writeCredentialsFile(creds: ClaudeCredentials): void {
+  try {
+    fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2));
+  } catch (err) {
+    logger.error({ err }, 'Failed to write credentials file');
+  }
+}
+
+/** Get the current OAuth access token, refreshing if expired. */
+async function getValidOAuthToken(
+  oauthTokenFromEnv: string | undefined,
+): Promise<string | undefined> {
+  // Try credentials file first (preferred — supports refresh)
+  const creds = readCredentialsFile();
+  const oauth = creds?.claudeAiOauth;
+
+  if (oauth?.accessToken) {
+    const now = Date.now();
+    if (oauth.expiresAt - now > REFRESH_BUFFER_MS) {
+      // Token still fresh
+      return oauth.accessToken;
+    }
+
+    // Token expired or expiring soon — attempt refresh
+    if (oauth.refreshToken) {
+      logger.info('OAuth token expired, refreshing...');
+      const refreshed = await refreshOAuthToken(oauth.refreshToken);
+      if (refreshed) {
+        // Persist the new tokens
+        const updated: ClaudeCredentials = {
+          ...creds,
+          claudeAiOauth: {
+            ...oauth,
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken ?? oauth.refreshToken,
+            expiresAt: refreshed.expiresAt,
+          },
+        };
+        writeCredentialsFile(updated);
+        logger.info('OAuth token refreshed and saved');
+        return refreshed.accessToken;
+      }
+      logger.warn('Token refresh failed, falling back to existing token');
+      return oauth.accessToken;
+    }
+  }
+
+  // Fall back to .env token
+  return oauthTokenFromEnv;
+}
+
+interface RefreshedToken {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt: number;
+}
+
+function refreshOAuthToken(
+  refreshToken: string,
+): Promise<RefreshedToken | null> {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: CLAUDE_CODE_CLIENT_ID,
+    });
+
+    const url = new URL(CLAUDE_AI_TOKEN_URL);
+    const req = httpsRequest(
+      {
+        hostname: url.hostname,
+        port: 443,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(Buffer.concat(chunks).toString());
+            if (data.access_token) {
+              const expiresIn = data.expires_in ?? 18000; // default 5h
+              resolve({
+                accessToken: data.access_token,
+                refreshToken: data.refresh_token,
+                expiresAt: Date.now() + expiresIn * 1000,
+              });
+            } else {
+              logger.error(
+                { data },
+                'OAuth refresh response missing access_token',
+              );
+              resolve(null);
+            }
+          } catch (err) {
+            logger.error({ err }, 'Failed to parse OAuth refresh response');
+            resolve(null);
+          }
+        });
+      },
+    );
+
+    req.on('error', (err) => {
+      logger.error({ err }, 'OAuth token refresh request failed');
+      resolve(null);
+    });
+
+    req.write(body);
+    req.end();
+  });
 }
 
 export function startCredentialProxy(
@@ -35,7 +190,7 @@ export function startCredentialProxy(
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
-  const oauthToken =
+  const oauthTokenFromEnv =
     secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN;
 
   const upstreamUrl = new URL(
@@ -48,7 +203,7 @@ export function startCredentialProxy(
     const server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
-      req.on('end', () => {
+      req.on('end', async () => {
         const body = Buffer.concat(chunks);
         const headers: Record<string, string | number | string[] | undefined> =
           {
@@ -73,8 +228,9 @@ export function startCredentialProxy(
           // x-api-key only, so they pass through without token injection.
           if (headers['authorization']) {
             delete headers['authorization'];
-            if (oauthToken) {
-              headers['authorization'] = `Bearer ${oauthToken}`;
+            const token = await getValidOAuthToken(oauthTokenFromEnv);
+            if (token) {
+              headers['authorization'] = `Bearer ${token}`;
             }
           }
         }
