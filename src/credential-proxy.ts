@@ -257,7 +257,9 @@ export function startCredentialProxy(
           {
             hostname: upstreamUrl.hostname,
             port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: (upstreamUrl.pathname !== '/' ? upstreamUrl.pathname : '') + req.url,
+            path:
+              (upstreamUrl.pathname !== '/' ? upstreamUrl.pathname : '') +
+              req.url,
             method: req.method,
             headers,
           } as RequestOptions,
