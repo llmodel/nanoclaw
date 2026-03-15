@@ -95,7 +95,10 @@ async function getValidOAuthToken(
     // Double-check after acquiring lock (another caller may have already refreshed)
     const creds2 = readCredentialsFile();
     const oauth2 = creds2?.claudeAiOauth;
-    if (oauth2?.accessToken && oauth2.expiresAt - Date.now() > REFRESH_BUFFER_MS) {
+    if (
+      oauth2?.accessToken &&
+      oauth2.expiresAt - Date.now() > REFRESH_BUFFER_MS
+    ) {
       result = oauth2.accessToken;
     } else if (oauth2?.refreshToken) {
       logger.info('OAuth token expired, refreshing...');
@@ -254,7 +257,7 @@ export function startCredentialProxy(
           {
             hostname: upstreamUrl.hostname,
             port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: req.url,
+            path: (upstreamUrl.pathname !== '/' ? upstreamUrl.pathname : '') + req.url,
             method: req.method,
             headers,
           } as RequestOptions,
